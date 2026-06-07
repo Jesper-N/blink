@@ -1,3 +1,7 @@
 .build/
 blink-detector
 *.jsonl
+AGENTS.md
+.venv/
+models/*.task
+__pycache__/

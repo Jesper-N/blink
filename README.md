@@ -1,97 +1,60 @@
-# Blink Detector
+# Blink
 
-Local-only macOS webcam blink counter.
+Blink is a local webcam blink counter that runs entirely on your machine. It is meant for
+tracking how often you blink over longer sessions, so you can spot whether you may be
+under-blinking. I made it to check whether my dry eyes might be related to not blinking enough.
 
-It uses Apple `AVFoundation` and `Vision` face landmarks to count blinks while you work. It only counts when exactly one face and at least one eye landmark are visible, adapts to head tilt/side posture, logs derived stats to JSONL, and never saves or sends webcam frames.
+It uses MediaPipe Face Landmarker blendshapes and a simple eye aperture check to count full
+blinks. It accounts for head tilt, roll, camera angle, forward/back movement, side-to-side
+movement, and looking down or up, as long as one face stays visible to the webcam.
 
-## Privacy
+The project is intentionally small: one setup command, one run command, no command line tuning.
+If you want different settings, edit `CONFIG` in `blink_detector.py`.
 
-- No cloud APIs.
-- No screenshots.
-- No preview window.
-- No image or video files.
-- No landmark point dumps.
-- Frames stay in memory and are discarded after analysis.
+## privacy
 
-## Build
+- Webcam frames stay in memory.
+- No frames, screenshots, preview windows, images, videos, or landmark dumps are written.
+- Logs contain derived blink and gaze numbers only.
+- The included launcher uses macOS `sandbox-exec` to deny outbound networking.
+- The detector refuses to run through `python blink_detector.py`; use `./blink-detector`.
+- Network is only used by `make setup` to install dependencies and download the local model.
+
+## setup
 
 ```bash
-make
+make setup
 ```
 
-## Run
+This creates `.venv`, installs the Python dependencies, downloads the MediaPipe face model into
+`models/`, and builds the `blink-detector` launcher.
+
+## run
 
 ```bash
 ./blink-detector
 ```
 
-Longer session:
+The script prints one line per counted blink and appends JSONL stats to `blink-stats.jsonl`.
 
-```bash
-./blink-detector --report-every 30 --log-file blink-stats.jsonl
-```
+There are no runtime flags. This is deliberate. The launcher is also the privacy boundary, so
+the normal path should stay boring and hard to misuse.
 
-If camera permission is denied:
+## output
 
-```text
-System Settings > Privacy & Security > Camera
-```
+Useful fields:
 
-## Output
+- `blinks`: total counted blinks
+- `sinceBlink`: visible seconds since the previous counted blink
+- `longestNoBlink`: longest visible-time gap without a blink in the session
+- `bpm60`, `bpm5m`, `bpmAll`: blink rate using face-visible time
+- `visible`: total face-visible time
+- `visiblePct`: percent of elapsed time where one usable face was visible
 
-Example:
+The JSONL log also records `session_start` and `session_end` rows. The `session_end` row includes
+the current no-blink gap at the moment the script stops.
 
-```text
-face=yes faceCount=1 procFps=29.80 visible=12.50min visiblePct=96.00 blinks=180 sinceBlink=4.20s bpm60=14.00 bpm5m=14.20 bpmAll=14.40 eye=0.27 eye60(p10/p50/p90)=0.18/0.27/0.31 blinkMs60(avg/p90)=116.00/180.00
-```
+## settings
 
-Important fields:
-
-- `blinks`: total counted blinks after 2-second burst de-duplication
-- `sinceBlink`: visible seconds since last counted blink
-- `bpm60`: blink rate over last 60 visible seconds
-- `bpm5m`: blink rate over last 5 visible minutes
-- `bpmAll`: blink rate over all visible time
-- `visiblePct`: percent of runtime where your face was visible
-- `procFps`: actual processed frames per second
-- `eye`: current eye-open ratio; lower means more closed
-- `blinkMs60`: blink duration stats in milliseconds
-
-## Stats file
-
-Default:
-
-```text
-blink-stats.jsonl
-```
-
-Use another file:
-
-```bash
-./blink-detector --log-file ~/blink-workday.jsonl
-```
-
-Disable file logging:
-
-```bash
-./blink-detector --no-log-file
-```
-
-The JSONL contains only derived metrics: blink counts, blink rates, visible-face time, eye-ratio stats, frame-quality percentages, calibration state, and config. No frames, images, video, screenshots, or landmark points.
-
-## Common options
-
-```bash
-./blink-detector --list-cameras
-./blink-detector --camera-index 1
-./blink-detector --fps 45
-./blink-detector --width 640 --height 480
-./blink-detector --blink-rate-limit-sec 0
-```
-
-## Troubleshooting
-
-- `face=no`: improve lighting, keep your head in webcam view, or move closer.
-- Low `procFps`: close heavy apps, lower capture size, or lower `--fps`.
-- Missed blinks: try `--fps 45`.
-- Counts too low during deliberate rapid blinking: use `--blink-rate-limit-sec 0`.
+Edit `CONFIG` near the top of `blink_detector.py` for camera index, FPS, frame size, thresholds,
+model path, or log path.
