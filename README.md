@@ -2,7 +2,7 @@
 
 Local-only macOS webcam blink counter.
 
-It uses Apple `AVFoundation` and `Vision` face landmarks to count blinks while you work. It only counts when exactly one face is visible, logs derived stats to JSONL, and never saves or sends webcam frames.
+It uses Apple `AVFoundation` and `Vision` face landmarks to count blinks while you work. It only counts when exactly one face and at least one eye landmark are visible, adapts to head tilt/side posture, logs derived stats to JSONL, and never saves or sends webcam frames.
 
 ## Privacy
 
@@ -90,7 +90,7 @@ The JSONL contains only derived metrics: blink counts, blink rates, visible-face
 
 ## Troubleshooting
 
-- `face=no`: improve lighting, face the camera, or move closer.
+- `face=no`: improve lighting, keep your head in webcam view, or move closer.
 - Low `procFps`: close heavy apps, lower capture size, or lower `--fps`.
 - Missed blinks: try `--fps 45`.
 - Counts too low during deliberate rapid blinking: use `--blink-rate-limit-sec 0`.

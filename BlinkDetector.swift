@@ -114,6 +114,9 @@ struct Config {
         if let logFilePath = config.logFilePath, logFilePath.isEmpty {
             throw CLIError.badArgument("--log-file cannot be empty")
         }
+        guard config.width > 0, config.height > 0 else {
+            throw CLIError.badArgument("--width and --height must be > 0")
+        }
 
         return config
     }
@@ -356,6 +359,7 @@ final class BlinkCounter {
     private var multiFaceFrames = 0
     private var noLandmarkFrames = 0
     private var eyeRatioSamples: [TimedValue] = []
+    private var lastBaselineWindowAdaptSeconds = 0.0
     private var blinkDurationSumSeconds = 0.0
     private var lastBlinkDurationSeconds: Double?
     private var lastFaceCount = 0
@@ -403,7 +407,7 @@ final class BlinkCounter {
             ],
             "report_fields": [
                 "elapsed_sec": "seconds since run started",
-                "visible_sec": "seconds with one visible face and eye landmarks",
+                "visible_sec": "seconds with one visible face and at least one eye landmark",
                 "visible_pct": "percent of wall time with visible face",
                 "face_visible": "whether current processed frame is countable",
                 "face_count": "faces detected in current processed frame",
@@ -427,13 +431,13 @@ final class BlinkCounter {
         ])
     }
 
-    func update(face: VNFaceObservation?, faceCount: Int, nowSeconds: Double) {
+    func update(face: VNFaceObservation?, faceCount: Int, nowSeconds: Double, imageWidth: Int, imageHeight: Int) {
         processedFrames += 1
         lastFaceCount = faceCount
 
         guard
             let face,
-            let ratio = eyeOpenRatio(face: face)
+            let ratio = eyeOpenRatio(face: face, imageWidth: imageWidth, imageHeight: imageHeight)
         else {
             faceVisible = false
             lastEyeRatio = nil
@@ -466,6 +470,7 @@ final class BlinkCounter {
             return
         }
 
+        adaptBaselineFromRecentSamples(nowSeconds: nowSeconds)
         updateBlinkState(ratio: ratio, nowSeconds: nowSeconds)
         reportIfNeeded(nowSeconds: nowSeconds)
     }
@@ -540,9 +545,29 @@ final class BlinkCounter {
     private func adaptBaseline(with ratio: Double) {
         guard config.closedThreshold == nil, config.openThreshold == nil else { return }
         if let baseline = baselineOpenRatio {
-            baselineOpenRatio = baseline * 0.995 + ratio * 0.005
+            baselineOpenRatio = baseline * 0.98 + ratio * 0.02
         } else if config.calibrateSeconds == 0 {
             baselineOpenRatio = ratio
+        }
+    }
+
+    private func adaptBaselineFromRecentSamples(nowSeconds: Double) {
+        guard config.closedThreshold == nil, config.openThreshold == nil else { return }
+        guard nowSeconds - lastBaselineWindowAdaptSeconds >= 1.0 else { return }
+        lastBaselineWindowAdaptSeconds = nowSeconds
+
+        let cutoff = visibleSeconds - 4.0
+        let recentRatios = eyeRatioSamples
+            .filter { $0.visibleSeconds >= cutoff }
+            .map(\.value)
+        guard recentRatios.count >= max(12, Int(config.fps.rounded())) else { return }
+        guard let recentOpenRatio = percentile(recentRatios, 0.90) else { return }
+
+        if let baseline = baselineOpenRatio {
+            let alpha = recentOpenRatio >= baseline ? 0.12 : 0.06
+            baselineOpenRatio = baseline * (1.0 - alpha) + recentOpenRatio * alpha
+        } else if config.calibrateSeconds == 0 {
+            baselineOpenRatio = recentOpenRatio
         }
     }
 
@@ -645,47 +670,85 @@ final class BlinkCounter {
         ])
     }
 
-    private func eyeOpenRatio(face: VNFaceObservation) -> Double? {
-        guard
-            let landmarks = face.landmarks,
-            let leftEye = landmarks.leftEye,
-            let rightEye = landmarks.rightEye
-        else {
-            return nil
+    private func eyeOpenRatio(face: VNFaceObservation, imageWidth: Int, imageHeight: Int) -> Double? {
+        guard let landmarks = face.landmarks else { return nil }
+
+        var ratioSum = 0.0
+        var ratioCount = 0
+        if let leftEye = landmarks.leftEye,
+           let ratio = regionOpenRatio(leftEye, face: face, imageWidth: imageWidth, imageHeight: imageHeight) {
+            ratioSum += ratio
+            ratioCount += 1
+        }
+        if let rightEye = landmarks.rightEye,
+           let ratio = regionOpenRatio(rightEye, face: face, imageWidth: imageWidth, imageHeight: imageHeight) {
+            ratioSum += ratio
+            ratioCount += 1
         }
 
-        guard
-            let leftRatio = regionOpenRatio(leftEye, face: face),
-            let rightRatio = regionOpenRatio(rightEye, face: face)
-        else {
-            return nil
-        }
-
-        return (leftRatio + rightRatio) / 2.0
+        guard ratioCount > 0 else { return nil }
+        return ratioSum / Double(ratioCount)
     }
 
-    private func regionOpenRatio(_ region: VNFaceLandmarkRegion2D, face: VNFaceObservation) -> Double? {
+    private func regionOpenRatio(
+        _ region: VNFaceLandmarkRegion2D,
+        face: VNFaceObservation,
+        imageWidth: Int,
+        imageHeight: Int
+    ) -> Double? {
         let points = region.normalizedPoints
-        guard let first = points.first, points.count >= 4 else { return nil }
+        guard points.count >= 4, imageWidth > 0, imageHeight > 0 else { return nil }
 
-        var minX = first.x
-        var maxX = first.x
-        var minY = first.y
-        var maxY = first.y
-
-        for index in 1..<points.count {
-            let point = points[index]
-            minX = min(minX, point.x)
-            maxX = max(maxX, point.x)
-            minY = min(minY, point.y)
-            maxY = max(maxY, point.y)
+        var meanX = 0.0
+        var meanY = 0.0
+        for landmarkPoint in points {
+            let point = imagePoint(landmarkPoint, face: face, imageWidth: imageWidth, imageHeight: imageHeight)
+            meanX += point.x
+            meanY += point.y
         }
 
-        let width = (maxX - minX) * face.boundingBox.width
-        let height = (maxY - minY) * face.boundingBox.height
+        let count = Double(points.count)
+        meanX /= count
+        meanY /= count
 
-        guard width > 0 else { return nil }
-        return Double(height / width)
+        var varianceX = 0.0
+        var varianceY = 0.0
+        var covariance = 0.0
+        for landmarkPoint in points {
+            let point = imagePoint(landmarkPoint, face: face, imageWidth: imageWidth, imageHeight: imageHeight)
+            let dx = point.x - meanX
+            let dy = point.y - meanY
+            varianceX += dx * dx
+            varianceY += dy * dy
+            covariance += dx * dy
+        }
+
+        varianceX /= count
+        varianceY /= count
+        covariance /= count
+
+        let trace = varianceX + varianceY
+        let determinant = varianceX * varianceY - covariance * covariance
+        let discriminant = max(0.0, trace * trace / 4.0 - determinant)
+        let major = trace / 2.0 + sqrt(discriminant)
+        let minor = trace / 2.0 - sqrt(discriminant)
+
+        guard major > 0, minor >= 0 else { return nil }
+        return sqrt(minor / major)
+    }
+
+    private func imagePoint(
+        _ point: CGPoint,
+        face: VNFaceObservation,
+        imageWidth: Int,
+        imageHeight: Int
+    ) -> (x: Double, y: Double) {
+        let x = face.boundingBox.origin.x + point.x * face.boundingBox.width
+        let y = face.boundingBox.origin.y + point.y * face.boundingBox.height
+        return (
+            Double(x) * Double(imageWidth),
+            Double(y) * Double(imageHeight)
+        )
     }
 
     private func format(_ value: Double) -> String {
@@ -790,16 +853,36 @@ final class CameraBlinkDetector: NSObject, AVCaptureVideoDataOutputSampleBufferD
             lastProcessedSeconds = timestamp
 
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-                counter.update(face: nil, faceCount: 0, nowSeconds: timestamp)
+                counter.update(
+                    face: nil,
+                    faceCount: 0,
+                    nowSeconds: timestamp,
+                    imageWidth: Int(config.width),
+                    imageHeight: Int(config.height)
+                )
                 return
             }
 
+            let imageWidth = CVPixelBufferGetWidth(pixelBuffer)
+            let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
             do {
                 try sequenceHandler.perform([faceLandmarksRequest], on: pixelBuffer, orientation: .up)
                 let faces = faceLandmarksRequest.results ?? []
-                counter.update(face: faces.count == 1 ? faces[0] : nil, faceCount: faces.count, nowSeconds: timestamp)
+                counter.update(
+                    face: faces.count == 1 ? faces[0] : nil,
+                    faceCount: faces.count,
+                    nowSeconds: timestamp,
+                    imageWidth: imageWidth,
+                    imageHeight: imageHeight
+                )
             } catch {
-                counter.update(face: nil, faceCount: 0, nowSeconds: timestamp)
+                counter.update(
+                    face: nil,
+                    faceCount: 0,
+                    nowSeconds: timestamp,
+                    imageWidth: imageWidth,
+                    imageHeight: imageHeight
+                )
             }
         }
     }
