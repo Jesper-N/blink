@@ -350,6 +350,7 @@ final class BlinkCounter {
     private var closedFrameCount = 0
     private var blinkStartedSeconds: Double?
     private var lastCountedBlinkSeconds: Double?
+    private var lastCountedBlinkVisibleSeconds: Double?
     private var lastEyeRatio: Double?
     private var faceVisible = false
     private var processedFrames = 0
@@ -378,7 +379,7 @@ final class BlinkCounter {
     }
 
     func printTerminalFieldLegend() {
-        print("fields: face visible; faceCount detected faces; procFps processed frames/s; visible face-visible minutes; visiblePct face-visible wall-time%; blinks counted; bpm60/bpm5m/bpmAll blink rates using visible time; eye current eye-open ratio; eye60 p10/p50/p90; blinkMs60 avg/p90 milliseconds")
+        print("fields: face visible; faceCount detected faces; procFps processed frames/s; visible face-visible minutes; visiblePct face-visible wall-time%; blinks counted; sinceBlink visible seconds since last counted blink; bpm60/bpm5m/bpmAll blink rates using visible time; eye current eye-open ratio; eye60 p10/p50/p90; blinkMs60 avg/p90 milliseconds")
         fflush(stdout)
     }
 
@@ -414,6 +415,7 @@ final class BlinkCounter {
                 "processed_fps": "actual landmark frames processed per second",
                 "frame_quality_pct": "visible/no-face/multi-face/no-landmark frame percentages",
                 "blinks_total": "counted blinks after burst de-duplication",
+                "since_last_blink_visible_sec": "visible seconds since last counted blink",
                 "blinks_60s": "counted blinks in last 60 visible seconds",
                 "blinks_5m": "counted blinks in last 5 visible minutes",
                 "bpm_60s": "blink rate over last 60 visible seconds",
@@ -536,6 +538,7 @@ final class BlinkCounter {
 
         totalBlinks += 1
         lastCountedBlinkSeconds = nowSeconds
+        lastCountedBlinkVisibleSeconds = visibleSeconds
         blinkEvents.append(BlinkEvent(visibleSeconds: visibleSeconds, durationSeconds: duration))
         blinkDurationSumSeconds += duration
         lastBlinkDurationSeconds = duration
@@ -616,10 +619,13 @@ final class BlinkCounter {
         let blinkDurationAvgAllMS = totalBlinks > 0
             ? blinkDurationSumSeconds / Double(totalBlinks) * 1000.0
             : nil
+        let sinceLastBlinkVisibleSeconds = lastCountedBlinkVisibleSeconds
+            .map { max(0.0, visibleSeconds - $0) }
         let calibrationText = baselineOpenRatio == nil && config.calibrateSeconds > 0
             && (config.closedThreshold == nil || config.openThreshold == nil)
             ? " calibrating=\(format(min(visibleSeconds, config.calibrateSeconds)))/\(format(config.calibrateSeconds))s"
             : ""
+        let sinceBlinkText = sinceLastBlinkVisibleSeconds.map { "\(format($0))s" } ?? "na"
         let eyeText = lastEyeRatio.map { " eye=\(format($0))" } ?? ""
         let eyeP50Text = eye60Stats.p50.map { format($0) } ?? "na"
         let eyeP10Text = eye60Stats.p10.map { format($0) } ?? "na"
@@ -627,7 +633,7 @@ final class BlinkCounter {
         let blinkAvgText = blinkDuration60Stats.avg.map { format($0) } ?? "na"
         let blinkP90Text = blinkDuration60Stats.p90.map { format($0) } ?? "na"
 
-        let line = "face=\(faceVisible ? "yes" : "no") faceCount=\(lastFaceCount) procFps=\(format(processedFPS)) visible=\(format(visibleMinutes))min visiblePct=\(format(visiblePct)) blinks=\(totalBlinks) bpm60=\(format(rolling60BPM)) bpm5m=\(format(rolling300BPM)) bpmAll=\(format(lifetimeBPM))\(eyeText) eye60(p10/p50/p90)=\(eyeP10Text)/\(eyeP50Text)/\(eyeP90Text) blinkMs60(avg/p90)=\(blinkAvgText)/\(blinkP90Text)\(calibrationText)"
+        let line = "face=\(faceVisible ? "yes" : "no") faceCount=\(lastFaceCount) procFps=\(format(processedFPS)) visible=\(format(visibleMinutes))min visiblePct=\(format(visiblePct)) blinks=\(totalBlinks) sinceBlink=\(sinceBlinkText) bpm60=\(format(rolling60BPM)) bpm5m=\(format(rolling300BPM)) bpmAll=\(format(lifetimeBPM))\(eyeText) eye60(p10/p50/p90)=\(eyeP10Text)/\(eyeP50Text)/\(eyeP90Text) blinkMs60(avg/p90)=\(blinkAvgText)/\(blinkP90Text)\(calibrationText)"
         print(line)
         fflush(stdout)
 
@@ -647,6 +653,7 @@ final class BlinkCounter {
                 "no_landmarks": percent(noLandmarkFrames, processedFrames)
             ],
             "blinks_total": totalBlinks,
+            "since_last_blink_visible_sec": jsonNumber(sinceLastBlinkVisibleSeconds),
             "blinks_60s": recent60Blinks.count,
             "blinks_5m": recent300Blinks.count,
             "bpm_60s": rolling60BPM,

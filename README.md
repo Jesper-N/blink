@@ -42,12 +42,13 @@ System Settings > Privacy & Security > Camera
 Example:
 
 ```text
-face=yes faceCount=1 procFps=29.80 visible=12.50min visiblePct=96.00 blinks=180 bpm60=14.00 bpm5m=14.20 bpmAll=14.40 eye=0.27 eye60(p10/p50/p90)=0.18/0.27/0.31 blinkMs60(avg/p90)=116.00/180.00
+face=yes faceCount=1 procFps=29.80 visible=12.50min visiblePct=96.00 blinks=180 sinceBlink=4.20s bpm60=14.00 bpm5m=14.20 bpmAll=14.40 eye=0.27 eye60(p10/p50/p90)=0.18/0.27/0.31 blinkMs60(avg/p90)=116.00/180.00
 ```
 
 Important fields:
 
 - `blinks`: total counted blinks after 2-second burst de-duplication
+- `sinceBlink`: visible seconds since last counted blink
 - `bpm60`: blink rate over last 60 visible seconds
 - `bpm5m`: blink rate over last 5 visible minutes
 - `bpmAll`: blink rate over all visible time
