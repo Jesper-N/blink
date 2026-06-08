@@ -23,6 +23,22 @@ SESSION_WINDOW_SECONDS = 300.0
 PRUNE_INTERVAL_SECONDS = 1.0
 LEFT_EYE_INDICES = (33, 160, 158, 133, 153, 144)
 RIGHT_EYE_INDICES = (362, 385, 387, 263, 373, 380)
+NATIVE_STDERR_DROP = (
+    b"INFO: Created TensorFlow Lite XNNPACK delegate",
+    b"portable_clearcut_uploader.cc:",
+    b"=== Source Location Trace:",
+    b"wireless/android/play/playlog/cplusplus/ion_http_client.cc:",
+)
+NATIVE_STDERR_IW_DROP = (
+    b"init-domain.cc:",
+    b"init_domain.cc:",
+    b"face_landmarker_graph.cc:",
+    b"gl_context.cc:",
+    b"gl_context_nsgl.cc:",
+    b"inference_feedback_manager.cc:",
+)
+_native_stderr_filter_installed = False
+_native_stderr_pipe_stream: TextIO | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +183,54 @@ def require_network_sandbox() -> None:
         "refusing to run without the deny-network launcher; "
         "use ./blink-detector, not python blink_detector.py"
     )
+
+
+def install_native_stderr_filter() -> None:
+    global _native_stderr_filter_installed
+    global _native_stderr_pipe_stream
+
+    if _native_stderr_filter_installed or os.name != "posix":
+        return
+
+    # MediaPipe native code writes straight to fd 2, bypassing Python logging controls.
+    passthrough_fd = os.dup(2)
+    read_fd, write_fd = os.pipe()
+    try:
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
+
+        _native_stderr_pipe_stream = sys.stderr
+        sys.stderr = os.fdopen(
+            os.dup(passthrough_fd),
+            "w",
+            buffering=1,
+            encoding=sys.stderr.encoding or "utf-8",
+            errors=sys.stderr.errors or "backslashreplace",
+        )
+        sys.__stderr__ = sys.stderr
+
+        def forward_stderr() -> None:
+            with os.fdopen(read_fd, "rb", buffering=0) as stderr_pipe:
+                for line in stderr_pipe:
+                    drop = any(part in line for part in NATIVE_STDERR_DROP) or (
+                        line.startswith((b"I0000 ", b"W0000 "))
+                        and any(part in line for part in NATIVE_STDERR_IW_DROP)
+                    )
+                    if not drop:
+                        try:
+                            os.write(passthrough_fd, line)
+                        except OSError:
+                            return
+
+        threading.Thread(
+            target=forward_stderr,
+            name="blink-native-stderr-filter",
+            daemon=True,
+        ).start()
+        _native_stderr_filter_installed = True
+    except OSError:
+        _native_stderr_pipe_stream = None
+        os.dup2(passthrough_fd, 2)
 
 
 def check_privacy() -> int:
@@ -890,6 +954,7 @@ class LatestFrameCamera:
 
 def import_runtime_deps() -> tuple[Any, Any, Any, Any, Any]:
     require_network_sandbox()
+    install_native_stderr_filter()
     matplotlib_cache = Path(".build/matplotlib").resolve()
     matplotlib_cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_cache))
